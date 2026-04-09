@@ -82,6 +82,13 @@ class BMSBluetoothConnector:
     DALY_WRITE_UUID = "0000fff2-0000-1000-8000-00805f9b34fb"
     DALY_NOTIFY_UUID = "0000fff1-0000-1000-8000-00805f9b34fb"
     
+    # UUIDs para BMS con servicio personalizado (tipo Xiaoxiang/JBD modificado)
+    # Estos son los UUIDs específicos que reportó el usuario
+    CUSTOM_SERVICE_UUID = "02f00000-0000-0000-0000-00000000fe00"
+    CUSTOM_WRITE_UUID = "02f00000-0000-0000-0000-00000000ff01"  # Solo Write
+    CUSTOM_NOTIFY_UUID = "02f00000-0000-0000-0000-00000000ff02"  # Read, Notify
+    CUSTOM_RW_NOTIFY_UUID = "02f00000-0000-0000-0000-00000000ff04"  # Read, Write, Notify
+    
     # UUIDs para BMS JK (Jikong)
     JK_SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
     JK_CHAR_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
@@ -138,7 +145,7 @@ class BMSBluetoothConnector:
         elif self.mode == "jk":
             return self._build_command_jk(command)
         else:
-            # Default JBD/Smart BMS
+            # Default JBD/Smart BMS (incluye modo custom)
             return self._build_command_jbd(command, data)
     
     def _parse_jbd_basic_info(self, data: bytes) -> Optional[BMSData]:
@@ -307,8 +314,32 @@ class BMSBluetoothConnector:
         for service in self.client.services:
             service_uuid = service.uuid.lower()
             
+            # Detectar servicio personalizado (02f00000-...)
+            if "02f00000" in service_uuid:
+                print("  → Detectado: BMS con servicio personalizado (Xiaoxiang/JBD modificado)")
+                self.mode = "custom"
+                for char in service.characteristics:
+                    char_uuid = char.uuid.lower()
+                    # ff01 es solo Write
+                    if "00000000ff01" in char_uuid and "write" in char.properties:
+                        self.write_uuid = char.uuid
+                        print(f"     Write UUID: {self.write_uuid}")
+                    # ff02 es Read + Notify
+                    if "00000000ff02" in char_uuid and "notify" in char.properties:
+                        self.notify_uuid = char.uuid
+                        print(f"     Notify UUID: {self.notify_uuid}")
+                    # ff04 es Read + Write + Notify (alternativa)
+                    if "00000000ff04" in char_uuid and "write" in char.properties and "notify" in char.properties:
+                        if not self.write_uuid:
+                            self.write_uuid = char.uuid
+                            print(f"     Write UUID (alt): {self.write_uuid}")
+                        if not self.notify_uuid:
+                            self.notify_uuid = char.uuid
+                            print(f"     Notify UUID (alt): {self.notify_uuid}")
+                return True
+            
             # Detectar JBD/Smart BMS
-            if "0000ff00" in service_uuid:
+            elif "0000ff00" in service_uuid:
                 print("  → Detectado: BMS JBD/Smart BMS")
                 self.mode = "jbd"
                 for char in service.characteristics:
@@ -465,6 +496,7 @@ class BMSBluetoothConnector:
         elif self.mode == "jk":
             command = self._build_command(0x03)  # Comando JK
         else:
+            # Comando JBD estándar (también para modo custom)
             command = self._build_command(0x03)  # Comando JBD estándar
         
         try:
@@ -484,11 +516,14 @@ class BMSBluetoothConnector:
                 if self.mode == "daly":
                     return self._parse_daly_basic_info(self.last_response)
                 else:
-                    # JBD/JK parsing
-                    if len(self.last_response) > 4:
+                    # JBD/JK/custom parsing
+                    if len(self.last_response) > 4 and self.last_response[0] == 0xDD:
                         payload_length = self.last_response[3]
                         payload = self.last_response[4:4+payload_length]
                         return self._parse_jbd_basic_info(payload)
+                    else:
+                        # Intentar parsear directamente
+                        return self._parse_jbd_basic_info(self.last_response)
                         
         except Exception as e:
             print(f"Error solicitando información: {e}")
