@@ -97,6 +97,18 @@ async def main():
 asyncio.run(main())
 ```
 
+## Archivos disponibles
+
+| Archivo | Descripción |
+|---------|-------------|
+| `bms_connector.py` | Script principal con detección automática |
+| `bms_connector_paired.py` | Para usar después de emparejar con bluetoothctl |
+| `bms_auth.py` | Intenta autenticación con PIN |
+| `bms_h21.py` | Específico para firmware H2.1_103E_30XF |
+| `bms_debug.py` | Debug básico de comandos |
+| `bms_debug_v2.py` | Prueba múltiples formatos de comandos |
+| `bms_sniffer.py` | Escucha notificaciones pasivamente |
+
 ## Troubleshooting
 
 ### Error: "No se pudo conectar"
@@ -112,6 +124,27 @@ asyncio.run(main())
 ### Sin datos de celdas
 - El comando de voltajes de celdas puede variar según el modelo
 - Algunos BMS requieren un comando diferente para obtener celdas
+
+### Error: "Characteristic was not found"
+- El BMS usa UUIDs diferentes. Ejecuta: `python bms_connector.py --mac XX:XX:XX:XX:XX:XX --discover`
+
+### Problemas con PIN
+- Algunos BMS requieren emparejamiento con PIN antes de usar
+- Usa `bluetoothctl` para emparejar primero:
+  ```
+  bluetoothctl
+  scan on
+  pair XX:XX:XX:XX:XX:XX
+  # Ingresa PIN (ej: 123456)
+  trust XX:XX:XX:XX:XX:XX
+  disconnect XX:XX:XX:XX:XX:XX
+  exit
+  ```
+- Luego usa: `python bms_connector_paired.py XX:XX:XX:XX:XX:XX`
+
+## Protocolo no compatible
+
+Si ningún script funciona, es posible que tu BMS use un **protocolo propietario** diferente al JBD/Smart BMS estándar. Algunos BMS chinos usan protocolos encriptados o modificados que requieren ingeniería inversa específica.
 
 ## Licencia
 
