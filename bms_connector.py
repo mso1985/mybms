@@ -233,15 +233,18 @@ class BMSBluetoothConnector:
     def _notification_handler(self, sender: BleakGATTCharacteristic, data: bytearray):
         """Manejar notificaciones BLE del BMS"""
         self.response_buffer.extend(data)
+        print(f"  [DEBUG] Recibidos {len(data)} bytes, buffer total: {len(self.response_buffer)}")
         
         # Para JBD: mensaje termina con 0x77
         if len(self.response_buffer) >= 4 and self.response_buffer[-1] == 0x77:
+            print(f"  [DEBUG] Mensaje completo (termina en 0x77): {self.response_buffer.hex()}")
             self.last_response = bytes(self.response_buffer)
             self.response_buffer = bytearray()
             self.command_event.set()
             self._process_response(self.last_response)
-        # Para DALY/JK: mensaje tiene longitud fija o header específico
-        elif len(self.response_buffer) >= 13:
+        # Para DALY/JK/custom: mensaje tiene longitud fija o header específico
+        elif len(self.response_buffer) >= 30:  # Reducido para respuestas más cortas
+            print(f"  [DEBUG] Buffer grande (>=30 bytes): {self.response_buffer.hex()}")
             self.last_response = bytes(self.response_buffer)
             self.response_buffer = bytearray()
             self.command_event.set()
