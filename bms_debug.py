@@ -1,247 +1,289 @@
 #!/usr/bin/env python3
 """
-Script de diagnóstico para BMS Smart BMS
-Prueba diferentes comandos y formatos para encontrar el correcto
+Script de debug para descubrir el protocolo del BMS
+Lee todas las características y prueba escribir en todas
 """
 
 import asyncio
-import struct
-import sys
-from typing import Optional, List
 from bleak import BleakClient, BleakScanner
-
-# UUIDs del BMS del usuario
-WRITE_UUID = "02f00000-0000-0000-0000-00000000ff01"
-NOTIFY_UUID = "02f00000-0000-0000-0000-00000000ff02"
-ALT_RW_NOTIFY_UUID = "02f00000-0000-0000-0000-00000000ff04"
-
-
-class BMSDebugger:
-    def __init__(self, mac_address: str):
-        self.mac_address = mac_address
-        self.client: Optional[BleakClient] = None
-        self.responses = []
-        self.command_event = asyncio.Event()
-        self.response_buffer = bytearray()
-        
-    def notification_handler(self, sender, data: bytearray):
-        """Manejar notificaciones BLE"""
-        print(f"  [NOTIFY] Recibidos {len(data)} bytes: {data.hex()}")
-        self.response_buffer.extend(data)
-        
-        # Verificar fin de mensaje (0x77 para protocolo JBD)
-        if len(self.response_buffer) >= 4 and self.response_buffer[-1] == 0x77:
-            print(f"  [NOTIFY] Mensaje completo: {self.response_buffer.hex()}")
-            self.responses.append(bytes(self.response_buffer))
-            self.command_event.set()
-    
-    def calculate_crc(self, data: bytes) -> int:
-        """Calcular CRC para protocolo JBD"""
-        return sum(data) & 0xFF
-    
-    def build_command_jbd(self, command: int, data: bytes = b'') -> bytes:
-        """Construir comando JBD estándar"""
-        length = len(data)
-        packet = bytes([0xDD, 0xA5, command, length]) + data
-        crc = self.calculate_crc(packet[2:])
-        packet += bytes([crc, 0x77])
-        return packet
-    
-    def build_command_jbd_alt(self, command: int) -> bytes:
-        """Alternativa de comando JBD"""
-        return bytes([0xDD, 0xA5, command, 0x00, 0xFF, 0x77])
-    
-    def build_command_simple(self, command: int) -> bytes:
-        """Comando simple sin CRC complejo"""
-        return bytes([0xDD, 0xA5, command, 0x00, 0xFF, 0x77])
-    
-    async def connect(self) -> bool:
-        """Conectar al BMS"""
-        print(f"Conectando a {self.mac_address}...")
-        try:
-            self.client = BleakClient(self.mac_address)
-            await self.client.connect()
-            if self.client.is_connected:
-                print(f"✓ Conectado a {self.client.name or 'BMS'}")
-                
-                # Configurar notificaciones
-                await self.client.start_notify(NOTIFY_UUID, self.notification_handler)
-                print(f"✓ Notificaciones activadas en {NOTIFY_UUID}")
-                return True
-        except Exception as e:
-            print(f"✗ Error de conexión: {e}")
-        return False
-    
-    async def send_command(self, command_bytes: bytes, description: str, timeout: float = 3.0):
-        """Enviar comando y esperar respuesta"""
-        print(f"\n{'='*60}")
-        print(f"Probando: {description}")
-        print(f"Comando (hex): {command_bytes.hex()}")
-        print(f"Comando (bytes): {list(command_bytes)}")
-        
-        self.command_event.clear()
-        self.response_buffer = bytearray()
-        self.responses = []
-        
-        try:
-            await self.client.write_gatt_char(WRITE_UUID, command_bytes, response=False)
-            print(f"✓ Comando enviado")
-            
-            # Esperar respuesta
-            try:
-                await asyncio.wait_for(self.command_event.wait(), timeout=timeout)
-                print(f"✓ Respuesta recibida!")
-                
-                # Analizar respuesta
-                if self.responses:
-                    self.analyze_response(self.responses[-1])
-                    
-            except asyncio.TimeoutError:
-                print(f"✗ Timeout - no se recibió respuesta en {timeout}s")
-                
-        except Exception as e:
-            print(f"✗ Error enviando comando: {e}")
-    
-    def analyze_response(self, data: bytes):
-        """Analizar respuesta del BMS"""
-        print(f"\n--- Análisis de respuesta ---")
-        print(f"Total bytes: {len(data)}")
-        print(f"Hex: {data.hex()}")
-        print(f"Raw bytes: {list(data)}")
-        
-        if len(data) < 4:
-            print("Respuesta muy corta para analizar")
-            return
-        
-        # Verificar header JBD
-        if data[0] == 0xDD and data[1] == 0x03:
-            print("✓ Header JBD detectado (0xDD 0x03)")
-            payload_len = data[3]
-            print(f"  Payload length: {payload_len}")
-            
-            if len(data) >= 4 + payload_len + 2:
-                payload = data[4:4+payload_len]
-                crc_received = data[4+payload_len]
-                end_byte = data[4+payload_len+1]
-                
-                print(f"  Payload: {payload.hex()}")
-                print(f"  CRC recibido: 0x{crc_received:02X}")
-                print(f"  End byte: 0x{end_byte:02X} (esperado 0x77)")
-                
-                # Intentar parsear datos
-                self.try_parse_basic_info(payload)
-        elif data[0] == 0xDD:
-            print(f"? Header parcial JBD (0xDD), segundo byte: 0x{data[1]:02X}")
-        else:
-            print(f"? Header desconocido: 0x{data[0]:02X} 0x{data[1]:02X}")
-    
-    def try_parse_basic_info(self, data: bytes):
-        """Intentar parsear información básica"""
-        print(f"\n--- Intentando parsear datos ---")
-        
-        if len(data) < 20:
-            print(f"Datos insuficientes ({len(data)} bytes, necesito >= 20)")
-            return
-        
-        try:
-            # Intentar diferentes offsets y formatos
-            
-            # Formato JBD estándar
-            print("\nIntentando formato JBD estándar:")
-            voltage = struct.unpack('>H', data[0:2])[0] / 100.0
-            current_raw = struct.unpack('>h', data[2:4])[0]
-            current = current_raw / 100.0
-            capacity_remain = struct.unpack('>H', data[4:6])[0] / 100.0
-            capacity_total = struct.unpack('>H', data[6:8])[0] / 100.0
-            cycles = struct.unpack('>H', data[8:10])[0]
-            
-            print(f"  Voltaje: {voltage:.2f} V")
-            print(f"  Corriente: {current:.2f} A (raw: {current_raw})")
-            print(f"  Capacidad restante: {capacity_remain:.2f} Ah")
-            print(f"  Capacidad total: {capacity_total:.2f} Ah")
-            print(f"  Ciclos: {cycles}")
-            
-            if capacity_total > 0:
-                soc = int((capacity_remain / capacity_total) * 100)
-                print(f"  SOC: {soc}%")
-            
-            # Temperaturas
-            if len(data) >= 24:
-                num_temps = data[22]
-                print(f"  Número de temperaturas: {num_temps}")
-                for i in range(min(num_temps, 4)):
-                    if 23 + i*2 + 2 <= len(data):
-                        temp_raw = struct.unpack('>h', data[23 + i*2:25 + i*2])[0]
-                        temp = (temp_raw - 2731) / 10.0
-                        print(f"    Temp {i+1}: {temp:.1f}°C (raw: {temp_raw})")
-                        
-        except Exception as e:
-            print(f"  Error parseando: {e}")
-    
-    async def run_tests(self):
-        """Ejecutar batería de pruebas"""
-        
-        # Comandos JBD estándar
-        await self.send_command(
-            self.build_command_jbd(0x03),
-            "JBD: Información básica (comando 0x03)"
-        )
-        
-        await asyncio.sleep(1)
-        
-        await self.send_command(
-            self.build_command_jbd(0x04),
-            "JBD: Voltajes de celdas (comando 0x04)"
-        )
-        
-        await asyncio.sleep(1)
-        
-        # Comando versión/hardware
-        await self.send_command(
-            self.build_command_jbd(0x05),
-            "JBD: Información del BMS (comando 0x05)"
-        )
-        
-        await asyncio.sleep(1)
-        
-        # Comando estado de protección
-        await self.send_command(
-            self.build_command_jbd(0x00),
-            "JBD: Estado de protección (comando 0x00)"
-        )
-        
-        await asyncio.sleep(1)
-        
-        # Probar con formato alternativo
-        await self.send_command(
-            self.build_command_jbd_alt(0x03),
-            "JBD ALT: Información básica (formato alternativo)"
-        )
-        
-    async def disconnect(self):
-        if self.client and self.client.is_connected:
-            await self.client.disconnect()
-            print("\nDesconectado")
 
 
 async def main():
-    if len(sys.argv) < 2:
-        print("Uso: python bms_debug.py <MAC_ADDRESS>")
-        print("Ejemplo: python bms_debug.py A4:C1:38:XX:XX:XX")
-        sys.exit(1)
+    # Escanear
+    print("Escaneando dispositivos BLE (10s)...")
+    devices = await BleakScanner.discover(timeout=10.0, return_adv=True)
     
-    mac = sys.argv[1]
-    debugger = BMSDebugger(mac)
+    device_list = []
+    for addr, (device, adv) in devices.items():
+        name = device.name or adv.local_name or ""
+        rssi = adv.rssi if hasattr(adv, 'rssi') else -100
+        device_list.append((addr, name, rssi))
     
-    if await debugger.connect():
-        try:
-            await debugger.run_tests()
-        except KeyboardInterrupt:
-            print("\n\nInterrumpido por el usuario")
-        finally:
-            await debugger.disconnect()
-    else:
-        print("No se pudo conectar")
+    device_list.sort(key=lambda x: -x[2])
+    
+    print(f"\nDispositivos encontrados ({len(device_list)}):")
+    for i, (addr, name, rssi) in enumerate(device_list, 1):
+        print(f"  {i}. {name or '[Sin nombre]'} [{addr}] RSSI: {rssi}")
+    
+    print("\nSelecciona dispositivo (numero o MAC):")
+    sel = input("> ").strip()
+    
+    try:
+        idx = int(sel) - 1
+        address = device_list[idx][0]
+    except:
+        address = sel
+    
+    print(f"\nConectando a {address}...")
+    
+    async with BleakClient(address) as client:
+        print("Conectado!\n")
+        
+        # Recopilar todas las características
+        all_chars = []
+        
+        print("=" * 60)
+        print("SERVICIOS Y CARACTERISTICAS")
+        print("=" * 60)
+        
+        for service in client.services:
+            print(f"\n[Servicio] {service.uuid}")
+            for char in service.characteristics:
+                props = ", ".join(char.properties)
+                print(f"  [Char] {char.uuid}")
+                print(f"         Handle: {char.handle}")
+                print(f"         Props: {props}")
+                all_chars.append(char)
+        
+        # Leer todas las características que se pueden leer
+        print("\n" + "=" * 60)
+        print("LEYENDO CARACTERISTICAS")
+        print("=" * 60)
+        
+        for char in all_chars:
+            if "read" in char.properties:
+                try:
+                    value = await client.read_gatt_char(char.uuid)
+                    print(f"\n{char.uuid}:")
+                    print(f"  Hex: {value.hex()}")
+                    # Intentar decodificar como ASCII
+                    try:
+                        ascii_val = value.decode('ascii', errors='replace')
+                        if any(c.isalnum() for c in ascii_val):
+                            print(f"  ASCII: {ascii_val}")
+                    except:
+                        pass
+                except Exception as e:
+                    print(f"\n{char.uuid}: Error - {e}")
+        
+        # Suscribirse a TODAS las notificaciones
+        print("\n" + "=" * 60)
+        print("SUSCRIBIENDO A NOTIFICACIONES")
+        print("=" * 60)
+        
+        received_data = []
+        
+        def notification_handler(sender, data):
+            print(f"\n*** [RX de {sender}] {len(data)} bytes:")
+            print(f"    Hex: {data.hex()}")
+            try:
+                ascii_str = data.decode('ascii', errors='replace')
+                if any(c.isalnum() for c in ascii_str):
+                    print(f"    ASCII: {ascii_str}")
+            except:
+                pass
+            received_data.append((sender, data))
+        
+        notify_chars = []
+        for char in all_chars:
+            if "notify" in char.properties or "indicate" in char.properties:
+                try:
+                    await client.start_notify(char.uuid, notification_handler)
+                    print(f"Suscrito a: {char.uuid}")
+                    notify_chars.append(char)
+                except Exception as e:
+                    print(f"Error suscribiendo a {char.uuid}: {e}")
+        
+        # Esperar un poco por si hay notificaciones automáticas
+        print("\nEsperando notificaciones automaticas (3s)...")
+        await asyncio.sleep(3)
+        
+        # Encontrar características de escritura
+        write_chars = [c for c in all_chars if "write" in c.properties or "write-without-response" in c.properties]
+        
+        print("\n" + "=" * 60)
+        print("MODO INTERACTIVO")
+        print("=" * 60)
+        print("\nComandos:")
+        print("  1 - Enviar comando JBD basico (DD A5 03 00 FF FD 77)")
+        print("  2 - Enviar PIN 123456 como ASCII")
+        print("  3 - Enviar bytes: 01 00")
+        print("  4 - Leer todas las caracteristicas de nuevo")
+        print("  5 - Probar TODOS los comandos comunes")
+        print("  6 - Enviar PIN y luego JBD")
+        print("  h XXYYZZ - Enviar hex a TODAS las char de escritura")
+        print("  w N XXYYZZ - Escribir en caracteristica N especifica")
+        print("  l - Listar caracteristicas de escritura")
+        print("  q - Salir")
+        
+        # Comandos comunes de diferentes BMS
+        common_commands = [
+            ("JBD Basic 0x03", bytes([0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77])),
+            ("JBD Cells 0x04", bytes([0xDD, 0xA5, 0x04, 0x00, 0xFF, 0xFC, 0x77])),
+            ("JBD HW 0x05", bytes([0xDD, 0xA5, 0x05, 0x00, 0xFF, 0xFB, 0x77])),
+            ("Daly SOC", bytes([0xA5, 0x40, 0x90, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7D])),
+            ("Simple 0x00", bytes([0x00])),
+            ("Simple 0x01", bytes([0x01])),
+            ("Query 01 00", bytes([0x01, 0x00])),
+            ("PIN ASCII", b"123456"),
+            ("PIN null term", b"123456\x00"),
+            ("PIN hex", bytes([0x12, 0x34, 0x56])),
+            ("Btsnoop basic", bytes([0x01, 0x00, 0x01, 0x01, 0x12, 0x00, 0x12, 0x00])),
+            ("Btsnoop volt", bytes([0x01, 0x00, 0x01, 0x01, 0x90, 0x04, 0x24, 0x01])),
+            ("AT cmd", b"AT\r\n"),
+            ("GetInfo", b"GetInfo\r\n"),
+        ]
+        
+        while True:
+            try:
+                cmd = input("\n> ").strip()
+                
+                if cmd == 'q':
+                    break
+                    
+                elif cmd == 'l':
+                    print("\nCaracteristicas de escritura:")
+                    for i, c in enumerate(write_chars):
+                        print(f"  {i}: {c.uuid} (handle {c.handle})")
+                
+                elif cmd == '1':
+                    data = bytes([0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77])
+                    print(f"\nEnviando JBD cmd 0x03: {data.hex()}")
+                    for wc in write_chars:
+                        print(f"  -> {wc.uuid}")
+                        try:
+                            await client.write_gatt_char(wc.uuid, data, response=False)
+                        except Exception as e:
+                            print(f"     Error: {e}")
+                    await asyncio.sleep(1.0)
+                
+                elif cmd == '2':
+                    data = b"123456"
+                    print(f"\nEnviando PIN: {data}")
+                    for wc in write_chars:
+                        print(f"  -> {wc.uuid}")
+                        try:
+                            await client.write_gatt_char(wc.uuid, data, response=False)
+                        except Exception as e:
+                            print(f"     Error: {e}")
+                    await asyncio.sleep(1.0)
+                
+                elif cmd == '3':
+                    data = bytes([0x01, 0x00])
+                    print(f"\nEnviando: {data.hex()}")
+                    for wc in write_chars:
+                        print(f"  -> {wc.uuid}")
+                        try:
+                            await client.write_gatt_char(wc.uuid, data, response=False)
+                        except Exception as e:
+                            print(f"     Error: {e}")
+                    await asyncio.sleep(1.0)
+                
+                elif cmd == '4':
+                    print("\nLeyendo caracteristicas...")
+                    for char in all_chars:
+                        if "read" in char.properties:
+                            try:
+                                value = await client.read_gatt_char(char.uuid)
+                                print(f"  {char.uuid}: {value.hex()}")
+                            except Exception as e:
+                                print(f"  {char.uuid}: Error - {e}")
+                
+                elif cmd == '5':
+                    print("\n*** Probando todos los comandos comunes ***")
+                    for name, data in common_commands:
+                        received_data.clear()
+                        print(f"\n--- {name}: {data.hex()} ---")
+                        for wc in write_chars:
+                            try:
+                                await client.write_gatt_char(wc.uuid, data, response=False)
+                            except Exception as e:
+                                print(f"  Error en {wc.uuid}: {e}")
+                        
+                        await asyncio.sleep(1.5)
+                        
+                        if received_data:
+                            print(f"  >>> RESPUESTA RECIBIDA! <<<")
+                        else:
+                            print(f"  (sin respuesta)")
+                
+                elif cmd == '6':
+                    print("\nEnviando PIN primero, luego comando JBD...")
+                    
+                    # PIN
+                    pin = b"123456"
+                    for wc in write_chars:
+                        try:
+                            await client.write_gatt_char(wc.uuid, pin, response=False)
+                            print(f"  PIN enviado a {wc.uuid}")
+                        except:
+                            pass
+                    
+                    await asyncio.sleep(1.0)
+                    
+                    # JBD
+                    jbd = bytes([0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77])
+                    for wc in write_chars:
+                        try:
+                            await client.write_gatt_char(wc.uuid, jbd, response=False)
+                            print(f"  JBD enviado a {wc.uuid}")
+                        except:
+                            pass
+                    
+                    await asyncio.sleep(1.5)
+                
+                elif cmd.startswith('h '):
+                    try:
+                        hex_str = cmd[2:].replace(' ', '')
+                        data = bytes.fromhex(hex_str)
+                        print(f"\nEnviando: {data.hex()}")
+                        for wc in write_chars:
+                            print(f"  -> {wc.uuid}")
+                            try:
+                                await client.write_gatt_char(wc.uuid, data, response=False)
+                            except Exception as e:
+                                print(f"     Error: {e}")
+                        await asyncio.sleep(1.0)
+                    except ValueError:
+                        print("Formato hex invalido")
+                
+                elif cmd.startswith('w '):
+                    try:
+                        parts = cmd[2:].split(' ', 1)
+                        idx = int(parts[0])
+                        hex_str = parts[1].replace(' ', '')
+                        data = bytes.fromhex(hex_str)
+                        wc = write_chars[idx]
+                        print(f"\nEnviando a {wc.uuid}: {data.hex()}")
+                        await client.write_gatt_char(wc.uuid, data, response=False)
+                        await asyncio.sleep(1.0)
+                    except Exception as e:
+                        print(f"Error: {e}")
+                
+                else:
+                    print("Comando no reconocido")
+                    
+            except KeyboardInterrupt:
+                break
+            except EOFError:
+                break
+        
+        # Limpiar suscripciones
+        for char in notify_chars:
+            try:
+                await client.stop_notify(char.uuid)
+            except:
+                pass
 
 
 if __name__ == "__main__":

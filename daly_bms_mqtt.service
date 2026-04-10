@@ -1,0 +1,21 @@
+[Unit]
+Description=Daly BMS MQTT Client
+After=network.target bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+User=mariano
+WorkingDirectory=/home/mariano/bms
+ExecStart=/usr/bin/python3 /home/mariano/bms/daly_bms_mqtt.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Reintentar si falla al inicio
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
